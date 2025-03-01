@@ -47,7 +47,6 @@ define('timeout', type=float, default=3, help='SSH connection timeout')
 define('delay', type=float, default=3, help='The delay to call recycle_worker')
 define('maxconn', type=int, default=20,
        help='Maximum live connections (ssh sessions) per client')
-define('font', default='', help='custom font filename')
 define('encoding', default='',
        help='''The default character encoding of ssh servers.
 Example: --encoding='utf-8' to solve the problem with some switches&routers''')
@@ -80,11 +79,6 @@ def get_app_settings(options):
         websocket_ping_interval=options.wpintvl,
         debug=options.debug,
         xsrf_cookies=options.xsrf,
-        font=Font(
-            get_font_filename(options.font,
-                              os.path.join(base_dir, *font_dirs)),
-            font_dirs[1:]
-        ),
         origin_policy=get_origin_setting(options)
     )
     return settings
@@ -177,20 +171,6 @@ def get_origin_setting(options):
         raise ValueError('Empty origin list')
 
     return origins
-
-
-def get_font_filename(font, font_dir):
-    filenames = {f for f in os.listdir(font_dir) if not f.startswith('.')
-                 and os.path.isfile(os.path.join(font_dir, f))}
-    if font:
-        if font not in filenames:
-            raise ValueError(
-                'Font file {!r} not found'.format(os.path.join(font_dir, font))
-            )
-    elif filenames:
-        font = filenames.pop()
-
-    return font
 
 
 def check_encoding_setting(encoding):

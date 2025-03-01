@@ -42,62 +42,16 @@ class InvalidValueError(Exception):
 
 class SSHClient(paramiko.SSHClient):
 
-    def handler(self, title, instructions, prompt_list):
-        answers = []
-        for prompt_, _ in prompt_list:
-            prompt = prompt_.strip().lower()
-            if prompt.startswith('password'):
-                answers.append(self.password)
-            elif prompt.startswith('verification'):
-                answers.append(self.totp)
-            else:
-                raise ValueError('Unknown prompt: {}'.format(prompt_))
-        return answers
-
-    def auth_interactive(self, username, handler):
-        if not self.totp:
-            raise ValueError('Need a verification code for 2fa.')
-        self._transport.auth_interactive(username, handler)
-
     def _auth(self, username, password, pkey, *args):
-        self.password = password
-        saved_exception = None
-        two_factor = False
-        allowed_types = set()
-        two_factor_types = {'keyboard-interactive', 'password'}
-
-        if pkey is not None:
-            logging.info('Trying publickey authentication')
-            try:
-                allowed_types = set(
-                    self._transport.auth_publickey(username, pkey)
-                )
-                two_factor = allowed_types & two_factor_types
-                if not two_factor:
-                    return
-            except paramiko.SSHException as e:
-                saved_exception = e
-
-        if two_factor:
-            logging.info('Trying publickey 2fa')
-            return self.auth_interactive(username, self.handler)
-
-        if password is not None:
-            logging.info('Trying password authentication')
-            try:
-                self._transport.auth_password(username, password)
-                return
-            except paramiko.SSHException as e:
-                saved_exception = e
-                allowed_types = set(getattr(e, 'allowed_types', []))
-                two_factor = allowed_types & two_factor_types
-
-        if two_factor:
-            logging.info('Trying password 2fa')
-            return self.auth_interactive(username, self.handler)
-
-        assert saved_exception is not None
-        raise saved_exception
+        if pkey is None:
+            raise ValueError('A private key is required for authentication.')
+            
+        logging.info('Trying publickey authentication')
+        try:
+            self._transport.auth_publickey(username, pkey)
+            return
+        except paramiko.SSHException as e:
+            raise e
 
 
 class PrivateKey(object):
@@ -114,7 +68,6 @@ class PrivateKey(object):
     def __init__(self, privatekey, password=None, filename=''):
         self.privatekey = privatekey
         self.filename = filename
-        self.password = password
         self.check_length()
         self.iostr = io.StringIO(privatekey)
         self.last_exception = None
@@ -138,7 +91,7 @@ class PrivateKey(object):
                             break
         return name, len(line_)
 
-    def get_specific_pkey(self, name, offset, password):
+    def get_specific_pkey(self, name, offset):
         self.iostr.seek(offset)
         logging.debug('Reset offset to {}.'.format(offset))
 
@@ -147,9 +100,7 @@ class PrivateKey(object):
         pkey = None
 
         try:
-            pkey = pkeycls.from_private_key(self.iostr, password=password)
-        except paramiko.PasswordRequiredException:
-            raise InvalidValueError('Need a passphrase to decrypt the key.')
+            pkey = pkeycls.from_private_key(self.iostr)
         except (paramiko.SSHException, ValueError) as exc:
             self.last_exception = exc
             logging.debug(str(exc))
@@ -163,12 +114,11 @@ class PrivateKey(object):
             raise InvalidValueError('Invalid key {}.'.format(self.filename))
 
         offset = self.iostr.tell() - length
-        password = to_bytes(self.password) if self.password else None
-        pkey = self.get_specific_pkey(name, offset, password)
+        pkey = self.get_specific_pkey(name, offset)
 
         if pkey is None and name == 'Ed25519':
             for name in ['RSA', 'ECDSA', 'DSS']:
-                pkey = self.get_specific_pkey(name, offset, password)
+                pkey = self.get_specific_pkey(name, offset)
                 if pkey:
                     break
 
@@ -176,11 +126,7 @@ class PrivateKey(object):
             return pkey
 
         logging.error(str(self.last_exception))
-        msg = 'Invalid key'
-        if self.password:
-            msg += ' or wrong passphrase "{}" for decrypting it.'.format(
-                    self.password)
-        raise InvalidValueError(msg)
+        raise InvalidValueError('Invalid key {}'.format(self.filename))
 
 
 class MixinHandler(object):
@@ -391,21 +337,16 @@ class IndexHandler(MixinHandler, tornado.web.RequestHandler):
         hostname = self.get_hostname()
         port = self.get_port()
         username = self.get_value('username')
-        password = self.get_argument('password', u'')
         privatekey, filename = self.get_privatekey()
-        passphrase = self.get_argument('passphrase', u'')
-        totp = self.get_argument('totp', u'')
 
         if isinstance(self.policy, paramiko.RejectPolicy):
             self.lookup_hostname(hostname, port)
 
-        if privatekey:
-            pkey = PrivateKey(privatekey, passphrase, filename).get_pkey_obj()
-        else:
-            pkey = None
+        if not privatekey:
+            raise ValueError('A private key is required for authentication.')
+        pkey = PrivateKey(privatekey, None, filename).get_pkey_obj()
 
-        self.ssh_client.totp = totp
-        args = (hostname, port, username, password, pkey)
+        args = (hostname, port, username, None, pkey)
         logging.debug(args)
 
         return args
